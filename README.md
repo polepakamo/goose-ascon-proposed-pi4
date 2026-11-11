@@ -66,8 +66,3 @@ Then repeat with the single-boolean dataset: `DATASET=bool` in front of the same
 ```bash
 cd ~/goose-proposed && PUB=pi@192.168.31.127 SUB=pi@192.168.31.89 bash scripts/run_security.sh
 ```
-
-## Status (honest)
-* Tested on a PC: `lib/goose_sec.c` including nonce layout, collision pairs, the window (peek does not change state, forged high sqNum cannot block later frames, 64-slot edge, stNum wrap), extension parse; `analyze.py` on synthetic data with three schemes.
-* Not yet compiled or run: the new `proposed` branches in the publisher and receiver and the injector's `tamper` mode. The baseline parts they sit next to compile and run on your Pis. Expect the first `build.sh` to reveal any slip, and the first round trip (`rej_auth=0`) to reveal any offset or AAD mismatch.
-* The window state is per receiver; see the limitations in `PROPOSED_SCHEME.md`.
