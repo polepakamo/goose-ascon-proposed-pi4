@@ -150,6 +150,18 @@ int main(int argc, char** argv)
     double* t_inc = calloc((size_t) total, sizeof(double));
     int* flen = calloc((size_t) total, sizeof(int));
     char* newst = calloc((size_t) total, 1);
+#ifdef GS_COMPONENT_TIMING
+    /* component build: per-frame step times from lib/goose_publisher.c (see goose_sec.h) */
+    double* t_nonce  = calloc((size_t) total, sizeof(double));
+    double* t_crypto = calloc((size_t) total, sizeof(double));
+    double* t_send   = calloc((size_t) total, sizeof(double));
+    {   /* cost of one timer = a pair of back-to-back clock reads; reported so the paper can state it */
+        uint64_t sum_pair = 0, k;
+        for (k = 0; k < 100000; k++) { uint64_t x = now_ns(); uint64_t y = now_ns(); sum_pair += y - x; }
+        printf("timer_cost_ns=%.1f  (mean of back-to-back clock-read pairs, component timing build)\n",
+               (double) sum_pair / 100000.0);
+    }
+#endif
 
     printf("gs_pub  scheme=%s  dataset=%s  burst=%d  gap=%dus  iface=%s  cpu=%d  iv_len=%d\n",
            gs_scheme_name(), dataset, burst, gap_us, iface, cpu, gs_iv_len());
@@ -173,6 +185,11 @@ int main(int argc, char** argv)
         t_pub[i] = (double)(c - b) / 1e3;
         flen[i] = gs_last_frame_size;
         newst[i] = (char) ns;
+#ifdef GS_COMPONENT_TIMING
+        t_nonce[i]  = (double) gs_pub_nonce_ns  / 1e3;
+        t_crypto[i] = (double) gs_pub_crypto_ns / 1e3;
+        t_send[i]   = (double) gs_pub_send_ns   / 1e3;
+#endif
         if (i == 0) {
             printf("first frame: %d bytes", flen[0]);
             if (expect > 0) printf("  (expected %d)%s", expect, flen[0] == expect ? "  OK" : "  <-- MISMATCH");
@@ -184,10 +201,18 @@ int main(int argc, char** argv)
     if (outfile) {
         FILE* f = fopen(outfile, "w");
         if (f) {
+#ifdef GS_COMPONENT_TIMING
+            fprintf(f, "idx,warmup,newstate,frame_len,t_inc_us,t_gen_us,t_tx_us,t_nonce_us,t_crypto_us,t_send_us\n");
+            for (i = 0; i < total; i++)
+                fprintf(f, "%d,%d,%d,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\n", i, i < warmup, newst[i], flen[i],
+                        t_inc[i], t_pub[i], flen[i] * 8.0 / LINK_BPS * 1e6,
+                        t_nonce[i], t_crypto[i], t_send[i]);
+#else
             fprintf(f, "idx,warmup,newstate,frame_len,t_inc_us,t_gen_us,t_tx_us\n");
             for (i = 0; i < total; i++)
                 fprintf(f, "%d,%d,%d,%d,%.3f,%.3f,%.3f\n", i, i < warmup, newst[i], flen[i],
                         t_inc[i], t_pub[i], flen[i] * 8.0 / LINK_BPS * 1e6);
+#endif
             fclose(f);
             printf("wrote %s\n", outfile);
         }
@@ -199,6 +224,9 @@ int main(int argc, char** argv)
     printf("  errors = %d\n", errors);
 
     free(t_pub); free(t_inc); free(flen); free(newst);
+#ifdef GS_COMPONENT_TIMING
+    free(t_nonce); free(t_crypto); free(t_send);
+#endif
     LinkedList_destroyDeep(ds, (LinkedListValueDeleteFunction) MmsValue_delete);
     GoosePublisher_destroy(pub);
     return errors ? 2 : 0;

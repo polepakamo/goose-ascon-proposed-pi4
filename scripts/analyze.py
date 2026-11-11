@@ -162,6 +162,98 @@ def bench(d):
 
 
 # ---------------------------------------------------------------------------
+def components(d):
+    """Per-component breakdown from the component-timing build (COMPONENTS=1 bash build.sh).
+
+    The CSVs of that build carry extra columns: publisher t_nonce_us, t_crypto_us, t_send_us and
+    subscriber t_window_us, t_crypto_us. Every row is a mean over measured frames, then a mean of the
+    per-run means (the same rule as the totals). The two 'remainder' rows are NOT measured directly:
+        frame serialise + sendto = T_gen  - nonce - encrypt
+        parse + rebuild + rest   = T_proc - window - decrypt
+    so that the rows add up to the totals of the same run set, exactly as in a breakdown table.
+    Returns {scheme: dict} or {} if the CSVs were produced by the normal build."""
+    per = defaultdict(list)
+    for pubf in sorted(glob.glob(os.path.join(d, "perf_*_r*.pub.csv"))):
+        m = re.match(r"perf_(.+)_r(\d+)\.pub\.csv", os.path.basename(pubf))
+        subf = pubf.replace(".pub.csv", ".sub.csv")
+        if not m or not os.path.exists(subf):
+            continue
+        prows, srows = read_csv(pubf), read_csv(subf)
+        if not prows or not srows or "t_nonce_us" not in prows[0] or "t_window_us" not in srows[0]:
+            continue
+        pub = [r for r in prows if r["warmup"] == "0" and int(r["frame_len"]) > 0]
+        sub = [r for r in srows if r["verdict"] == "0" and r["warmup"] == "0"]
+        if not pub or not sub:
+            continue
+        lens = [int(r["frame_len"]) for r in pub]
+        timer_ns = None
+        logf = pubf.replace(".pub.csv", ".pub.log")
+        if os.path.exists(logf):
+            mm = re.search(r"timer_cost_ns=([0-9.]+)", open(logf, errors="replace").read())
+            timer_ns = float(mm.group(1)) if mm else None
+        col = lambda rows, k: mean([float(r[k]) for r in rows])
+        per[m.group(1)].append(dict(
+            frame=max(set(lens), key=lens.count),
+            gen=col(pub, "t_gen_us"), nonce=col(pub, "t_nonce_us"), enc=col(pub, "t_crypto_us"),
+            send=col(pub, "t_send_us"), tx=col(pub, "t_tx_us"),
+            proc=col(sub, "t_proc_us"), win=col(sub, "t_window_us"), dec=col(sub, "t_crypto_us"),
+            timer_ns=timer_ns))
+    out = {}
+    for scheme, rs in per.items():
+        m_ = lambda k: mean([r[k] for r in rs])
+        gen, nonce, enc, send, tx = m_("gen"), m_("nonce"), m_("enc"), m_("send"), m_("tx")
+        proc, win, dec = m_("proc"), m_("win"), m_("dec")
+        timers = [r["timer_ns"] for r in rs if r["timer_ns"] is not None]
+        out[scheme] = dict(
+            runs=len(rs), frame=max(set(r["frame"] for r in rs)), gen=gen, nonce=nonce, enc=enc, send=send,
+            serialise=gen - nonce - enc, tx=tx, proc=proc, win=win, dec=dec, parse=proc - win - dec,
+            e2e=gen + tx + proc, timer_ns=mean(timers) if timers else None)
+    return out
+
+
+NOTES = {   # scheme -> row -> note
+    "banerjee": dict(nonce="BER(stNum) BER(sqNum) t, zero padded (assumed; the original paper does not specify it)",
+                     enc="whole PDU value", dec="whole PDU value, before any parsing"),
+    "proposed": dict(nonce="stNum || sqNum || t, fixed width, 16 B",
+                     enc="allData value only; header fields are AAD", dec="allData value only"),
+}
+
+
+def component_table(scheme, c):
+    """Markdown table in the layout Stage | Component | Mean latency | % of T_E2E | Notes."""
+    e2e = c["e2e"]
+    p = lambda x: f"{100.0 * x / e2e:.2f}%"
+    n = NOTES.get(scheme, {})
+    rows = [("Stage", "Component", "Mean Latency (us)", "% of T_E2E", "Notes")]
+    secured = scheme in ("banerjee", "proposed")
+    stage = "Publisher (T_gen)"
+    if secured:
+        rows.append((stage, "Nonce construction (gs_nonce_*)", f(c["nonce"]), p(c["nonce"]), n.get("nonce", "")))
+        rows.append(("", "ASCON-AEAD128 encrypt (crypto_aead_encrypt)", f(c["enc"]), p(c["enc"]), n.get("enc", "")))
+        stage = ""
+    rows.append((stage, "Frame serialise + sendto() (rest of GoosePublisher_publish)", f(c["serialise"]),
+                 p(c["serialise"]), f"remainder of T_gen; of which sendto() = {f(c['send'])} us"))
+    rows.append(("", "Total T_gen", f(c["gen"]), p(c["gen"]), ""))
+    rows.append(("Transmission (T_tx)", f"Ethernet link ({c['frame']} B @ 100 Mbps)", f(c["tx"]), p(c["tx"]),
+                 "calculated: frame bytes x 8 / 100e6, not measured"))
+    rows.append(("Subscriber (T_proc)", "BER parse + nonce/AAD reconstruction (rest of receive path)",
+                 f(c["parse"]), p(c["parse"]),
+                 "remainder of T_proc: recv, header and extension parse, PDU walk, nonce/AAD rebuild, callback"))
+    if scheme == "proposed":
+        rows.append(("", "RFC 6479 replay window check", f(c["win"]), p(c["win"]), "peek + commit, 64-slot bitmap"))
+    if secured:
+        rows.append(("", "ASCON-AEAD128 decrypt", f(c["dec"]), p(c["dec"]), n.get("dec", "")))
+    rows.append(("", "Total T_proc", f(c["proc"]), p(c["proc"]), ""))
+    note = f"mean of {c['runs']} run(s)"
+    if c["timer_ns"] is not None:
+        note += f"; one timer costs about {c['timer_ns']:.0f} ns (not subtracted)"
+    rows.append(("End-to-End", "T_E2E = T_gen + T_tx + T_proc", f(e2e), "100.00%", note))
+    w = [max(len(r[i]) for r in rows) for i in range(5)]
+    line = lambda r: "| " + " | ".join(r[i].ljust(w[i]) for i in range(5)) + " |"
+    return [line(rows[0]), "|" + "|".join("-" * (w[i] + 2) for i in range(5)) + "|"] + [line(r) for r in rows[1:]]
+
+
+# ---------------------------------------------------------------------------
 def f(x, nd=3):
     return "n/a" if x is None or (isinstance(x, float) and math.isnan(x)) else f"{x:.{nd}f}"
 
@@ -225,6 +317,18 @@ def main(d):
                 md.append(f"| {s} | {k} | {r['published']} | {r['delivered']} | {r['rejected']} | "
                           f"{f(r['gen']['mean'])} | {f(r['proc']['mean'])} | {f(r['proc']['p99'])} | {f(r['e2e'])} |")
         md.append("")
+
+    comp = components(d)
+    if comp:
+        res["components"] = comp
+        md += ["## Per-component breakdown (component-timing build)", "",
+               "Each measured row is a timer around one step inside GoosePublisher_publish() / parseGooseMessage(). "
+               "The two 'remainder' rows are computed so that the rows add up to the totals (see `components()` in "
+               "analyze.py). Run this build separately from the normal matrix and take the T_gen / T_proc totals "
+               "from the normal run: the timers add a few clock reads.", ""]
+        for s in ["none", "banerjee", "proposed"]:
+            if s in comp:
+                md += [f"### {s}", ""] + component_table(s, comp[s]) + [""]
 
     if res["security"]:
         md += ["## Security tests (measured)", "",

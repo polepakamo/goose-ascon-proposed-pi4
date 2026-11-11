@@ -4,10 +4,16 @@ scripts/analyze.py can be tested without hardware. The numbers are random and
 mean nothing - never use them in a paper.
 
     python3 tests/make_fake_results.py /tmp/fake && python3 scripts/analyze.py /tmp/fake
+
+Add `--components` to also write the extra columns of the component-timing build (t_nonce_us,
+t_crypto_us, t_send_us / t_window_us, t_crypto_us), to test the per-component table:
+
+    python3 tests/make_fake_results.py /tmp/fake --components && python3 scripts/analyze.py /tmp/fake
 """
 import csv, os, random, sys
 
-out = sys.argv[1] if len(sys.argv) > 1 else "fake_results"
+out = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith("--") else "fake_results"
+COMP = "--components" in sys.argv
 os.makedirs(out, exist_ok=True)
 random.seed(1)
 
@@ -24,17 +30,22 @@ for scheme, (frame, g, p) in MODEL.items():
         with open(f"{out}/perf_{scheme}_r{run}.pub.csv", "w", newline="") as fp, \
              open(f"{out}/perf_{scheme}_r{run}.sub.csv", "w", newline="") as fs:
             wp = csv.writer(fp); ws = csv.writer(fs)
-            wp.writerow("idx,warmup,newstate,frame_len,t_inc_us,t_gen_us,t_tx_us".split(","))
-            ws.writerow("idx,warmup,stNum,sqNum,frame_len,verdict,t_proc_us".split(","))
+            wp.writerow("idx,warmup,newstate,frame_len,t_inc_us,t_gen_us,t_tx_us".split(",")
+                        + (["t_nonce_us", "t_crypto_us", "t_send_us"] if COMP else []))
+            ws.writerow("idx,warmup,stNum,sqNum,frame_len,verdict,t_proc_us".split(",")
+                        + (["t_window_us", "t_crypto_us"] if COMP else []))
             st, sq = 1, 0
+            sec = scheme != "none"
             for i in range(WARM + N):
                 new = (i % 8 == 0)
                 if new:
                     st += 1; sq = 0
-                wp.writerow([i, int(i < WARM), int(new), frame, 0.4,
-                             round(max(1, random.gauss(g + drift, 1.5)), 3), round(frame * 8 / 1e8 * 1e6, 3)])
-                ws.writerow([i, int(i < WARM), st, sq, frame, 0,
-                             round(max(1, random.gauss(p + drift, 1.2)), 3)])
+                tg = round(max(1, random.gauss(g + drift, 1.5)), 3)
+                tp = round(max(1, random.gauss(p + drift, 1.2)), 3)
+                extra_p = [round(0.5 * sec, 3), round(2.8 * sec, 3), round(tg * 0.7, 3)] if COMP else []
+                extra_s = [round(0.2 * (scheme == "proposed"), 3), round(3.0 * sec, 3)] if COMP else []
+                wp.writerow([i, int(i < WARM), int(new), frame, 0.4, tg, round(frame * 8 / 1e8 * 1e6, 3)] + extra_p)
+                ws.writerow([i, int(i < WARM), st, sq, frame, 0, tp] + extra_s)
                 sq += 1
 
 # security

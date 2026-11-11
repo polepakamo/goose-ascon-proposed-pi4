@@ -41,6 +41,30 @@
 extern "C" {
 #endif
 
+/* ---- optional per-component timing -----------------------------------------------------------
+ * Compile with -DGS_COMPONENT_TIMING (build.sh: COMPONENTS=1 bash build.sh) to time the individual
+ * steps inside GoosePublisher_publish() and parseGooseMessage(). OFF by default: the normal build
+ * contains no extra clock reads, so the T_gen / T_proc totals are not disturbed.
+ *   GS_TIC(v)            start a timer variable v
+ *   GS_TOC(dst, v)       dst  = nanoseconds elapsed since v
+ *   GS_TOC_ADD(dst, v)   dst += nanoseconds elapsed since v                                      */
+#ifdef GS_COMPONENT_TIMING
+#include <time.h>
+static inline uint64_t gs_now_ns(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (uint64_t) t.tv_sec * 1000000000ULL + (uint64_t) t.tv_nsec;
+}
+#define GS_TIC(v)           uint64_t v = gs_now_ns()
+#define GS_TOC(dst, v)      ((dst) = gs_now_ns() - (v))
+#define GS_TOC_ADD(dst, v)  ((dst) += gs_now_ns() - (v))
+#else
+#define GS_TIC(v)           ((void) 0)
+#define GS_TOC(dst, v)      ((void) 0)
+#define GS_TOC_ADD(dst, v)  ((void) 0)
+#endif
+
 typedef enum { GS_NONE = 0, GS_BANERJEE = 1, GS_PROPOSED = 2 } gs_scheme_t;
 typedef enum { GS_REPLAY_NONE = 0, GS_REPLAY_STRICT = 1 } gs_replay_t;
 
@@ -100,6 +124,10 @@ typedef struct {
     uint32_t st, sq;
     uint32_t frame_len;
     uint32_t verdict;
+#ifdef GS_COMPONENT_TIMING
+    uint64_t t_window_ns; /* RFC 6479 window check (peek + commit), part of t_proc_ns       */
+    uint64_t t_crypto_ns; /* crypto_aead_decrypt() call, part of t_proc_ns                   */
+#endif
 } gs_rec_t;
 
 void     gs_log_push(const gs_rec_t* r);   /* receiver thread */
@@ -114,6 +142,14 @@ extern volatile uint64_t gs_dbg[16];
 
 /* ---- publisher export ----------------------------------------------------- */
 extern volatile int gs_last_frame_size;    /* bytes of the last frame handed to the NIC */
+
+#ifdef GS_COMPONENT_TIMING
+/* step times (ns) of the LAST GoosePublisher_publish() call; 0 = the step was not executed
+ * (scheme none has no nonce and no encryption) */
+extern volatile uint64_t gs_pub_nonce_ns;   /* nonce construction                         */
+extern volatile uint64_t gs_pub_crypto_ns;  /* crypto_aead_encrypt()                      */
+extern volatile uint64_t gs_pub_send_ns;    /* Ethernet_sendPacket() (sendto)             */
+#endif
 
 #ifdef __cplusplus
 }

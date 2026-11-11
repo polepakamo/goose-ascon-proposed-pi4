@@ -52,6 +52,11 @@ static struct timespec s_t_start;
 static uint32_t        s_frame_len = 0;
 static gs_window_t     s_window;
 static bool            s_window_ready = false;
+#ifdef GS_COMPONENT_TIMING
+/* per-frame component times, only in the -DGS_COMPONENT_TIMING build (see goose_sec.h) */
+static uint64_t        s_c_window_ns = 0;   /* RFC 6479 window peek + commit */
+static uint64_t        s_c_crypto_ns = 0;   /* crypto_aead_decrypt()         */
+#endif
 
 static inline uint64_t ts_ns(const struct timespec* t)
 {
@@ -69,6 +74,10 @@ gsFinish(uint32_t verdict, uint32_t st, uint32_t sq)
     r.st = st; r.sq = sq;
     r.frame_len = s_frame_len;
     r.verdict = verdict;
+#ifdef GS_COMPONENT_TIMING
+    r.t_window_ns = s_c_window_ns;
+    r.t_crypto_ns = s_c_crypto_ns;
+#endif
     gs_log_push(&r);
 }
 
@@ -602,8 +611,11 @@ parseGooseMessage(GooseReceiver self, uint8_t* buffer, int numbytes)
         memcpy(ct, apdu + hl, (size_t) vl);
         memcpy(ct + vl, mac, 16);
 
-        if (crypto_aead_decrypt(plain, &plen, NULL, ct, (unsigned long long)(vl + 16),
-                                aad, (unsigned long long) alen, iv, GS_KEY) != 0) {
+        GS_TIC(t_crypto);
+        int drc = crypto_aead_decrypt(plain, &plen, NULL, ct, (unsigned long long)(vl + 16),
+                                      aad, (unsigned long long) alen, iv, GS_KEY);
+        GS_TOC_ADD(s_c_crypto_ns, t_crypto);
+        if (drc != 0) {
             gsFinish(GS_V_REJ_AUTH, 0, 0);
             return;
         }
@@ -647,7 +659,10 @@ parseGooseMessage(GooseReceiver self, uint8_t* buffer, int numbytes)
 
         /* 1. cheap replay pre-check on plaintext, NO decryption yet. Read-only. */
         if (!s_window_ready) { gs_window_init(&s_window); s_window_ready = true; }
-        if (gs_window_peek(&s_window, st, sq) != 0) { gsFinish(GS_V_REJ_REPLAY, st, sq); return; }
+        GS_TIC(t_win);
+        int peek = gs_window_peek(&s_window, st, sq);
+        GS_TOC_ADD(s_c_window_ns, t_win);
+        if (peek != 0) { gsFinish(GS_V_REJ_REPLAY, st, sq); return; }
 
         /* 2. authenticate + decrypt only allData */
         gs_nonce_fixed(nonce, st, sq, tp);
@@ -656,14 +671,19 @@ parseGooseMessage(GooseReceiver self, uint8_t* buffer, int numbytes)
         memcpy(ct, apdu + ad_off, (size_t) ad_len);
         memcpy(ct + ad_len, mac, 16);
 
-        if (crypto_aead_decrypt(plain, &plen, NULL, ct, (unsigned long long)(ad_len + 16),
-                                aad, (unsigned long long) alen, nonce, GS_KEY) != 0) {
+        GS_TIC(t_dec);
+        int rc_dec = crypto_aead_decrypt(plain, &plen, NULL, ct, (unsigned long long)(ad_len + 16),
+                                         aad, (unsigned long long) alen, nonce, GS_KEY);
+        GS_TOC_ADD(s_c_crypto_ns, t_dec);
+        if (rc_dec != 0) {
             gsFinish(GS_V_REJ_AUTH, st, sq);       /* window untouched: forgeries cannot move it */
             return;
         }
 
         /* 3. only now commit the window */
+        GS_TIC(t_com);
         gs_window_commit(&s_window, st, sq);
+        GS_TOC_ADD(s_c_window_ns, t_com);
 
         /* 4. rebuild the PDU with the plaintext allData and hand it to the stock parser */
         memcpy(wrapped, apdu, (size_t) ad_off);
@@ -691,6 +711,9 @@ static void* gooseReceiverLoop(void *threadParameter)
             if (rdy > 0) {
                 /* T_proc START: after select() returns, before recv() */
                 clock_gettime(CLOCK_MONOTONIC, &s_t_start);
+#ifdef GS_COMPONENT_TIMING
+                s_c_window_ns = 0; s_c_crypto_ns = 0;
+#endif
                 GooseReceiver_tick(self);
             }
             if (self->stop) break;

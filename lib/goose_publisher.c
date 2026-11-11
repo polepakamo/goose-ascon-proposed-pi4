@@ -10,8 +10,10 @@
  *    Ethernet | EtherType AppID Length Res1 Res2 | 0x61 PDU (value encrypted) | security extension
  *    Res1 = extension length (IEC 62351-6), Length covers PDU + extension.
  *
- *  Nothing in here is timed: the application times the GoosePublisher_publish()
- *  call from outside.
+ *  Nothing in here is timed by default: the application times the GoosePublisher_publish()
+ *  call from outside. Only when built with -DGS_COMPONENT_TIMING (COMPONENTS=1 bash build.sh)
+ *  the nonce construction, the crypto_aead_encrypt() call and the sendto() are timed
+ *  separately (see goose_sec.h); that build is for the per-component breakdown only.
  */
 
 #include "libiec61850_platform_includes.h"
@@ -274,6 +276,9 @@ GoosePublisher_publish(GoosePublisher self, LinkedList dataSet)
     size_t maxPayloadSize = GOOSE_MAX_MESSAGE_SIZE - self->payloadStart;
     int lengthIndex = self->lengthField;
 
+#ifdef GS_COMPONENT_TIMING
+    gs_pub_nonce_ns = 0; gs_pub_crypto_ns = 0; gs_pub_send_ns = 0;
+#endif
     self->payloadLength = createGoosePayload(self, dataSet, buffer, maxPayloadSize);
     if (self->payloadLength == -1) return -1;
 
@@ -301,8 +306,12 @@ GoosePublisher_publish(GoosePublisher self, LinkedList dataSet)
         if ((size_t)(self->payloadLength + ext_len) > maxPayloadSize) return -1;
         ext = buffer + self->payloadLength;
 
-        if (scheme == GS_BANERJEE) gs_nonce_ber  (nonce, self->stNum, self->sqNum, t);   /* ASSUMED nonce */
-        else                       gs_nonce_fixed(nonce, self->stNum, self->sqNum, t);
+        {
+            GS_TIC(t_nonce);
+            if (scheme == GS_BANERJEE) gs_nonce_ber  (nonce, self->stNum, self->sqNum, t);   /* ASSUMED nonce */
+            else                       gs_nonce_fixed(nonce, self->stNum, self->sqNum, t);
+            GS_TOC(gs_pub_nonce_ns, t_nonce);
+        }
 
         /* Length and Reserved1 are part of the AAD, so set them before encrypting */
         gooseLength = (size_t)(self->payloadLength + ext_len) + 8;
@@ -335,10 +344,14 @@ GoosePublisher_publish(GoosePublisher self, LinkedList dataSet)
         memcpy(aad + alen, ext, (size_t) av_tlv_len);
         alen += av_tlv_len;
 
-        crypto_aead_encrypt(ct, &clen,
-                            enc_ptr, (unsigned long long) enc_len,
-                            aad,     (unsigned long long) alen,
-                            NULL, nonce, GS_KEY);
+        {
+            GS_TIC(t_crypto);
+            crypto_aead_encrypt(ct, &clen,
+                                enc_ptr, (unsigned long long) enc_len,
+                                aad,     (unsigned long long) alen,
+                                NULL, nonce, GS_KEY);
+            GS_TOC(gs_pub_crypto_ns, t_crypto);
+        }
 
         memcpy((uint8_t*) enc_ptr, ct, (size_t) enc_len);   /* ciphertext replaces plaintext  */
         memcpy(ext + ext_len - 16, ct + enc_len, 16);        /* tag goes into the MAC TLV      */
@@ -352,7 +365,9 @@ GoosePublisher_publish(GoosePublisher self, LinkedList dataSet)
     {
         int total_frame_size = self->payloadStart + self->payloadLength;
         gs_last_frame_size = total_frame_size;
+        GS_TIC(t_send);
         Ethernet_sendPacket(self->ethernetSocket, self->buffer, total_frame_size);
+        GS_TOC(gs_pub_send_ns, t_send);
     }
     return 0;
 }

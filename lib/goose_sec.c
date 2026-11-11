@@ -17,6 +17,12 @@ const uint8_t GS_KEY[16] = {
 volatile int gs_last_frame_size = 0;
 volatile uint64_t gs_dbg[16];
 
+#ifdef GS_COMPONENT_TIMING
+volatile uint64_t gs_pub_nonce_ns = 0;
+volatile uint64_t gs_pub_crypto_ns = 0;
+volatile uint64_t gs_pub_send_ns = 0;
+#endif
+
 /* ------------------------------------------------------------------------ */
 /* configuration                                                             */
 /* ------------------------------------------------------------------------ */

@@ -103,7 +103,11 @@ int main(int argc, char** argv)
     if (outfile) {
         f = fopen(outfile, "w");
         if (!f) { perror("fopen"); return 1; }
+#ifdef GS_COMPONENT_TIMING
+        fprintf(f, "idx,warmup,stNum,sqNum,frame_len,verdict,t_proc_us,t_window_us,t_crypto_us\n");
+#else
         fprintf(f, "idx,warmup,stNum,sqNum,frame_len,verdict,t_proc_us\n");
+#endif
     }
 
     /* the receiver thread inherits this affinity */
@@ -161,8 +165,14 @@ int main(int argc, char** argv)
             if (!is_warm && r.verdict < 4) verdicts_measured[r.verdict]++;
             if (r.verdict == GS_V_REJ_REPLAY) { sum_rej_replay += us; n_rej_replay++; }
             if (r.verdict == GS_V_REJ_AUTH)   { sum_rej_auth += us;   n_rej_auth++; }
+#ifdef GS_COMPONENT_TIMING
+            if (f) fprintf(f, "%llu,%d,%u,%u,%u,%u,%.3f,%.3f,%.3f\n", (unsigned long long) idx, is_warm,
+                           r.st, r.sq, r.frame_len, r.verdict, us,
+                           (double) r.t_window_ns / 1e3, (double) r.t_crypto_ns / 1e3);
+#else
             if (f) fprintf(f, "%llu,%d,%u,%u,%u,%u,%.3f\n", (unsigned long long) idx, is_warm,
                            r.st, r.sq, r.frame_len, r.verdict, us);
+#endif
             idx++;
         }
         if (got) t_last = mono_s();

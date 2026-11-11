@@ -22,6 +22,10 @@
 #   EXPECT_SEC        expected secured frame size         [261]  (Banerjee Table II, Ascon-AEAD)
 #   IV_LEN            16 or 20 (extension size 55/59)     [20]   (20 reproduces the 261-byte frame
 #                                                          if the base frame is 202 bytes)
+#   COMPONENTS        1 = use the component-timing build  [0]    (build it first: COMPONENTS=1 bash build.sh)
+#                     and add the per-component table to results.md. Run this SEPARATELY from the
+#                     normal matrix: the timers add a few clock reads, so report T_gen / T_proc totals
+#                     from the normal run and the component split from this one.
 set -u
 PUB=${PUB:-pi@192.168.31.127}
 SUB=${SUB:-pi@192.168.31.89}
@@ -38,8 +42,12 @@ SCHEMES=${SCHEMES:-"none banerjee proposed"}
 EXPECT_NONE=${EXPECT_NONE:-202}
 EXPECT_SEC=${EXPECT_SEC:-261}
 IV_LEN=${IV_LEN:-20}
+COMPONENTS=${COMPONENTS:-0}
+BUILD_DIR=build
+if [ "$COMPONENTS" = "1" ]; then BUILD_DIR=build-components; fi
 
 TAG=${TAG:-$(date +%Y%m%d-%H%M%S)}
+if [ "$COMPONENTS" = "1" ]; then TAG="${TAG}-components"; fi
 OUT="results/$TAG"
 mkdir -p "$OUT"
 SSHO="-o BatchMode=yes -o ConnectTimeout=8"
@@ -70,12 +78,12 @@ for run in $(seq 1 "$RUNS"); do
         envs="GOOSE_SCHEME=$s GOOSE_IV_LEN=$IV_LEN"
         exp=$EXPECT_SEC; [ "$s" = none ] && exp=$EXPECT_NONE
 
-        ssh $SSHO "$SUB" "cd $REMOTE && mkdir -p results && sudo -E env $envs ./build/gs_sub $SUB_IF \
+        ssh $SSHO "$SUB" "cd $REMOTE && mkdir -p results && sudo -E env $envs ./$BUILD_DIR/gs_sub $SUB_IF \
             --count $COUNT --warmup $WARMUP --idle-timeout 6 --out results/$tagf.sub.csv" \
             > "$OUT/$tagf.sub.log" 2>&1 &
         subjob=$!
         sleep 3
-        ssh $SSHO "$PUB" "cd $REMOTE && mkdir -p results && sudo -E env $envs ./build/gs_pub $PUB_IF \
+        ssh $SSHO "$PUB" "cd $REMOTE && mkdir -p results && sudo -E env $envs ./$BUILD_DIR/gs_pub $PUB_IF \
             --count $((COUNT + 300)) --warmup $WARMUP --gap-us $GAP --burst $BURST --dataset $DATASET \
             --expect-size $exp --out results/$tagf.pub.csv" \
             > "$OUT/$tagf.pub.log" 2>&1

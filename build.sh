@@ -11,6 +11,15 @@ LIB="$H/libiec61850"
 SRC="$LIB/src"
 ASCON="$H/third_party/ascon"
 OUT="$H/build"
+CFLAGS_EXTRA=""
+# COMPONENTS=1 bash build.sh  ->  a separate build in build-components/ with a timer around each step
+# (-DGS_COMPONENT_TIMING), used only for the per-component latency table. The normal build is left
+# untouched, so its T_gen / T_proc totals contain no extra clock reads.
+if [ "${COMPONENTS:-0}" = "1" ]; then
+    OUT="$H/build-components"
+    CFLAGS_EXTRA="-DGS_COMPONENT_TIMING"
+    echo "component-timing build -> $OUT"
+fi
 mkdir -p "$OUT"
 
 # stack_config.h: use the copy cmake generated in the build tree (the one libiec61850.a was
@@ -30,7 +39,7 @@ INC="-I$STACK_CFG -I$HAL/inc -I$SRC -I$SRC/goose -I$SRC/common/inc \
  -I$SRC/mms/inc -I$SRC/mms/inc_private -I$SRC/mms/iso_mms/common -I$SRC/mms/iso_mms/server \
  -I$SRC/mms/iso_mms/asn1c -I$SRC/mms/asn1 \
  -I$SRC/iec61850/inc -I$SRC/iec61850/inc_private -I$SRC/logging"
-CFLAGS="-O2 -std=gnu99 -Wall -Wno-misleading-indentation -Wno-unused-but-set-variable -DPLATFORM_LINUX -D_GNU_SOURCE"
+CFLAGS="-O2 -std=gnu99 -Wall -Wno-misleading-indentation -Wno-unused-but-set-variable -DPLATFORM_LINUX -D_GNU_SOURCE $CFLAGS_EXTRA"
 
 echo "[1] unit tests (goose_sec.c, no network)"
 gcc -std=c99 -Wall -Wextra -O2 -Ilib tests/test_sec.c lib/goose_sec.c -o "$OUT/test_sec"
@@ -79,3 +88,6 @@ done
 
 echo "build ok -> $OUT"
 echo "frame-size self-check:  sudo GOOSE_SCHEME=none ./build/gs_pub <iface> --count 10 --warmup 0 --expect-size 202"
+if [ "${COMPONENTS:-0}" = "1" ]; then
+    echo "component run:          COMPONENTS=1 bash scripts/run_matrix.sh   (uses build-components/)"
+fi

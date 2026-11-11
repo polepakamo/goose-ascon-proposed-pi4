@@ -66,3 +66,40 @@ Then repeat with the single-boolean dataset: `DATASET=bool` in front of the same
 ```bash
 cd ~/goose-proposed && PUB=pi@192.168.31.127 SUB=pi@192.168.31.89 bash scripts/run_security.sh
 ```
+
+## Per-component breakdown (the "Stage | Component | Mean latency | % of T_E2E | Notes" table)
+
+The totals T_gen and T_proc come from the normal build. To split them into steps, build and run the
+instrumented variant. It is a separate build in `build-components/`, so the normal binaries and the
+normal runs are untouched:
+
+```
+COMPONENTS=1 bash build.sh                       # on each Pi
+COMPONENTS=1 RUNS=5 bash scripts/run_matrix.sh   # from the controller -> results/<tag>-components/
+```
+
+`scripts/analyze.py` then adds a "Per-component breakdown" table per scheme to `results.md` and
+`results.json`. Nothing in it is typed by hand.
+
+| Row | How it is obtained |
+|---|---|
+| Nonce construction | timer around `gs_nonce_ber` / `gs_nonce_fixed` in `GoosePublisher_publish()` |
+| ASCON-AEAD128 encrypt | timer around `crypto_aead_encrypt()` |
+| Frame serialise + sendto() | **computed**: `T_gen` - nonce - encrypt (the `sendto()` part alone is shown in the Notes column) |
+| Total T_gen | the publisher's existing `t_gen_us` |
+| Ethernet link (T_tx) | **calculated**: frame bytes x 8 / 100 Mbit/s, not measured |
+| BER parse + nonce/AAD reconstruction | **computed**: `T_proc` - window - decrypt (also contains `recv()`, header and extension parsing, and the application callback) |
+| RFC 6479 replay window check | timers around `gs_window_peek()` and `gs_window_commit()` (proposed scheme only) |
+| ASCON-AEAD128 decrypt | timer around `crypto_aead_decrypt()` |
+| Total T_proc | the subscriber's existing `t_proc_us` |
+
+Notes on reading the result:
+
+* Each timer is two `clock_gettime()` reads. The publisher log of the component build prints
+  `timer_cost_ns=...` (measured back-to-back read pairs); it is **not** subtracted. Because of this the
+  totals of a component run are slightly larger than those of a normal run. Report T_gen, T_proc and T_E2E
+  from the normal run and use the component run for the split.
+* A step that does not exist in a scheme has no row (no nonce or cipher rows for `none`, no window row for
+  `banerjee`).
+* Test the table code without hardware (the numbers are random and mean nothing):
+  `python3 tests/make_fake_results.py /tmp/fake --components && python3 scripts/analyze.py /tmp/fake`
